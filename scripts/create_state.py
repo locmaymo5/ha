@@ -3,6 +3,7 @@ import logging
 sys.path.insert(0, '.')
 import os
 import re
+import json
 import asyncio
 import concurrent.futures
 import argparse
@@ -72,7 +73,8 @@ async def login():
         regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
         emails = []
         for _ in range(15):
-            global_data = await page.evaluate('mw:window.WIZ_global_data')
+            # global_data = await page.evaluate('mw:window.WIZ_global_data')
+            global_data = json.loads(await page.locator('script[type="application/json"]').text_content())
             if not global_data:
                 await asyncio.sleep(1)
                 continue

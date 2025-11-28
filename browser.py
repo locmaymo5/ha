@@ -264,7 +264,8 @@ class BrowserWorker:
         await page.route("**/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/*", handle_apikeys)
         await page.goto('https://aistudio.google.com/apikey')
         email_regex = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-        global_data = await page.evaluate('mw:window.WIZ_global_data')
+        # global_data = await page.evaluate('mw:window.WIZ_global_data')
+        global_data = json.loads(await page.locator('script[type="application/json"]').text_content())
         for _, value in global_data.items():
             if not isinstance(value, str):
                 continue
