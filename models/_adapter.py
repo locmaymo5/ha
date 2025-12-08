@@ -2,10 +2,13 @@ import random
 import base64
 import dataclasses
 import json
+import uuid
+import time
 from typing import NoReturn, List, Any
 from .genai import GenerateContentRequest, GenerateContentResponse, UsageMetadata
 from .aistudio import PromptHistory, StreamEvent
 from . import aistudio, genai
+from . import openai as openai_models
 
 
 HARM_CATEGORY_MAP = {
@@ -436,3 +439,70 @@ def AIStudioListModelToGenAIListModel(models: aistudio.ListModelsResponse) -> ge
             topK=float(model.topK) if model.topK is not None else 64.0,
         ))
     return genai.ListModelsResponse(models=genai_models)
+
+def OpenAIRequestToGenAIRequest(request: openai_models.ChatCompletionRequest) -> genai.GenerateContentRequest:
+    system_instruction = None
+    contents = []
+    
+    messages = request.messages
+    # Handle System Instruction (first system message)
+    if messages and messages[0].role == 'system':
+        system_instruction = genai.Content(parts=[genai.Part(text=str(messages[0].content))])
+        messages = messages[1:]
+        
+    for msg in messages:
+        role = 'user'
+        if msg.role == 'assistant':
+            role = 'model'
+        elif msg.role == 'system':
+            role = 'user' # Map subsequent system messages to user
+        
+        # Handle content
+        text_content = ""
+        if isinstance(msg.content, str):
+            text_content = msg.content
+        elif isinstance(msg.content, list):
+            # Simple handling for list content (multimodal placeholder)
+            for part in msg.content:
+                if isinstance(part, dict) and 'text' in part:
+                    text_content += str(part['text'])
+        elif msg.content is None:
+            text_content = ""
+        
+        contents.append(genai.Content(role=role, parts=[genai.Part(text=text_content)]))
+    
+    return genai.GenerateContentRequest(
+        contents=contents,
+        systemInstruction=system_instruction
+    )
+
+def GenAIResponseToOpenAIChunk(response: genai.GenerateContentResponse, model: str, id: str) -> openai_models.ChatCompletionChunk:
+    content = ""
+    finish_reason = None
+    
+    if response.candidates:
+        candidate = response.candidates[0]
+        if candidate.finishReason:
+             finish_reason = str(candidate.finishReason).lower()
+             if finish_reason == "none": finish_reason = None
+
+        if candidate.content and candidate.content.parts:
+            for part in candidate.content.parts:
+                # Filter out thought
+                if getattr(part, 'thought', False):
+                    continue
+                if part.text:
+                    content += part.text
+    
+    return openai_models.ChatCompletionChunk(
+        id=id,
+        created=int(time.time()),
+        model=model,
+        choices=[
+            openai_models.ChunkChoice(
+                index=0,
+                delta=openai_models.Delta(content=content) if content else openai_models.Delta(),
+                finish_reason=finish_reason
+            )
+        ]
+    )

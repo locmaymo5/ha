@@ -23,6 +23,8 @@ from browser import BrowserPool, InterceptTask
 from models import _adapter as adapter, aistudio, genai
 from config import config, AIOHTTP_PROXY, AIOHTTP_PROXY_AUTH
 from utils import TinyProfiler, Profiler, CredentialManager
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from models import genai, openai as openai_models
 
 
 credentialManager = CredentialManager(config.Credentials)
@@ -44,6 +46,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+security = HTTPBearer()
+
+async def verify_openai_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if config.AuthKey and credentials.credentials != config.AuthKey:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -64,6 +77,86 @@ async def api_key_auth(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid API Key",
             )
+
+@app.get("/v1/models", dependencies=[Depends(verify_openai_token)])
+async def list_models_openai() -> openai_models.ModelList:
+    aistudio_models = browser_pool.get_Models()
+    data = []
+    for m in aistudio_models:
+        # Extract model ID from name (e.g., "models/gemini-1.5-pro" -> "gemini-1.5-pro")
+        model_id = m.name.split('/')[-1] if hasattr(m, 'name') else str(m)
+        data.append(openai_models.ModelCard(id=model_id))
+    
+    return openai_models.ModelList(data=data)
+
+
+@app.post("/v1/chat/completions", dependencies=[Depends(verify_openai_token)])
+async def chat_completions(request: openai_models.ChatCompletionRequest):
+    # Convert OpenAI request to GenAI request
+    genai_request = adapter.OpenAIRequestToGenAIRequest(request)
+    model_name = request.model
+    
+    # Reuse existing logic to schedule browser task
+    request_id = adapter._randomPromptId()
+    with Profiler(request_id) as profiler:
+        profiler.span('openai: receive request', {'model': model_name})
+        
+        prompt_history = adapter.GenAIRequestToAiStudioPromptHistory(model_name, genai_request, prompt_id=request_id)
+        
+        future = asyncio.Future()
+        await browser_pool.put_task(InterceptTask(prompt_history, future, profiler))
+        
+        try:
+            headers, body = await future
+        except TimeoutError:
+            raise HTTPException(status_code=504, detail="Upstream Request Timeout")
+        except Exception as e:
+             raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
+
+        if request.stream:
+            async def openai_stream():
+                chat_id = f"chatcmpl-{uuid.uuid4()}"
+                async for event in StreamGenerator(model_name, headers, body, profiler):
+                    genai_resp = adapter.AiStudioStreamEventToGenAIResponse(event)
+                    chunk = adapter.GenAIResponseToOpenAIChunk(genai_resp, model_name, chat_id)
+                    # Only yield if there is content or finish reason
+                    if chunk.choices[0].delta.content or chunk.choices[0].finish_reason:
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                yield "data: [DONE]\n\n"
+            
+            return StreamingResponse(openai_stream(), media_type="text/event-stream")
+        else:
+            # Non-streaming: accumulate response
+            full_content = ""
+            finish_reason = "stop"
+            
+            async for event in StreamGenerator(model_name, headers, body, profiler):
+                genai_resp = adapter.AiStudioStreamEventToGenAIResponse(event)
+                if genai_resp.candidates:
+                    cand = genai_resp.candidates[0]
+                    if cand.content and cand.content.parts:
+                        for part in cand.content.parts:
+                            # Filter out thought
+                            if not getattr(part, 'thought', False) and part.text:
+                                full_content += part.text
+                    if cand.finishReason:
+                         finish_reason = str(cand.finishReason).lower()
+            
+            resp = openai_models.ChatCompletionResponse(
+                id=f"chatcmpl-{uuid.uuid4()}",
+                created=int(time.time()),
+                model=model_name,
+                choices=[
+                    openai_models.Choice(
+                        index=0,
+                        message=openai_models.ChatMessage(role="assistant", content=full_content),
+                        finish_reason=finish_reason
+                    )
+                ],
+                usage=openai_models.Usage()
+            )
+            return JSONResponse(content=resp.model_dump(exclude_none=True))
+
 
 async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, profiler: Profiler) -> AsyncGenerator[StreamEvent, None]:
     url = config.AIStudioAPIUrl
