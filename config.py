@@ -22,6 +22,7 @@ class ProxyConfig(BaseModel):
 class Config(BaseModel):
     Debug: bool = False
     LogDir: str = './gemini_logs'
+    SaveLogs: bool = True
     StatesDir: str = './states'
     AIStudioAPIUrl: str = 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent'
     AIStudioUrl: str = 'https://aistudio.google.com'

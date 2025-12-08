@@ -306,9 +306,13 @@ class BrowserWorker:
                 await self.InterceptRequest(task.prompt_history, task.future, task.profiler)
             except Exception as exc:
                 task.profiler.span('worker: failed with exception', traceback.format_exception(exc))
-                task.future.set_exception(exc)
+                # Kiểm tra xem future đã xong chưa trước khi set exception để tránh InvalidStateError
+                if not task.future.done():
+                    task.future.set_exception(exc)
+                logger.error('Worker %s error processing task: %s', self._credential.email, exc)
+                # Không raise exception để vòng lặp while True tiếp tục chạy và xử lý task tiếp theo
 
-    async def InterceptRequest(self, prompt_history: PromptHistory, future: asyncio.Future, profiler: Profiler, timeout: int=60):
+    async def InterceptRequest(self, prompt_history: PromptHistory, future: asyncio.Future, profiler: Profiler, timeout: int=120):
         prompt_id = prompt_history.prompt.uri.split('/')[-1]
 
         async def handle_route(route: Route) -> None:
@@ -366,14 +370,33 @@ class BrowserWorker:
                     await page.locator('.glue-cookie-notification-bar__reject').click()
                 if await page.locator('button[aria-label="Close run settings panel"]').is_visible():
                     await page.locator('button[aria-label="Close run settings panel"]').click(force=True)
-                await page.locator('ms-text-chunk textarea').click()
-                await last_turn.click(force=True)
+                
+                # Đảm bảo nút rerun hiện lên bằng cách hover
+                await last_turn.hover()
                 profiler.span('Page: Last Turn Hover')
                 rerun = last_turn.locator('[name="rerun-button"]')
                 await expect(rerun).to_be_visible()
                 profiler.span('Page: Rerun Visible')
-                await rerun.click(force=True)
-                profiler.span('Page: Rerun Clicked')
-                await page.locator('ms-text-chunk textarea').click()
+
+                # Cơ chế Retry: Click và chờ phản hồi, nếu không thấy thì click lại
+                for i in range(5): # Thử tối đa 5 lần
+                    if future.done():
+                        break
+                    
+                    # Click nút Rerun
+                    await rerun.click(force=True)
+                    profiler.span(f'Page: Rerun Clicked ({i+1})')
+                    
+                    try:
+                        # Chờ tối đa 2 giây để xem request có được chặn hay không
+                        await asyncio.wait_for(asyncio.shield(future), timeout=2)
+                        break # Nếu future xong thì thoát vòng lặp
+                    except asyncio.TimeoutError:
+                        if i < 4:
+                            logger.warning(f"Click attempt {i+1} failed to trigger request, retrying...")
+                            # Hover lại để đảm bảo nút vẫn visible/active
+                            await last_turn.hover()
+                
+                # Chờ kết quả cuối cùng (nếu đã break ở trên thì cái này sẽ trả về ngay)
                 await future
                 await page.unroute("**/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/*")

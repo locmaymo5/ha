@@ -1,41 +1,43 @@
-# 调试开关，开启会改变部分行为，不推荐在部署时开启
+# Debug switch, enabling it will change some behaviors, not recommended to be enabled in deployment
 Debug: false
 
-# 日志目录，开启调试是将保存错误的请求详细记录至此目录，在生产中有泄漏对话的风险
+# Log directory, when debugging is enabled, detailed records of erroneous requests will be saved to this directory, there is a risk of leaking conversations in production
 LogDir: './gemini_logs'
-# 保存登录状态文件的目录
+# Enable or disable saving logs to disk
+SaveLogs: false
+# Directory to save login status files
 StatesDir: './states'
-# AI Studio 的地址配置，不推荐更改
+# AI Studio's address configuration, not recommended to change
 AIStudioAPIUrl: 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent'
 AIStudioUrl: 'https://aistudio.google.com'
 AIStudioChatUrl: 'https://aistudio.google.com/prompts/new_chat'
 AiohttpTimeout: 500
 
-# uvicorn 的监听地址和目录，仅在通过app.py运行时生效，通过uvicorn启动时不生效
+# uvicorn's listening address and directory, only effective when running through app.py, not effective when starting through uvicorn
 UvicornHost: '0.0.0.0'
 UvicornPort: 8000
 
-# ！！！用于鉴权的API Key 一定要更改！！！
+# !!! The API Key for authentication must be changed!!!
 AuthKey: 'YOUR_API_KEY'
 
-# 无头浏览器配置, 可选 true, false 或者 虚拟显示器 'virtual'
-Headless: 'virtual'
+# Headless browser configuration, optional true, false or virtual display 'virtual'
+Headless: 'true'
 
-# 代理配置, 可选socks5或http代理，使用socks5代理是不支持用户名密码鉴权
+# Proxy configuration, optional socks5 or http proxy, socks5 proxy does not support username and password authentication
 # proxy:
-#   server: 'socks5://127.0.0.1:7070'
+# server: 'socks5://127.0.0.1:7070'
 # proxy:
-#   server: 'http://127.0.0.1:7071'
-#   username: 'username'
-#   password: 'password'
+# server: 'http://127.0.0.1:7071'
+# username: 'username'
+# password: 'password'
 
-# 工作线程数，最大不超过配置帐号总数量
-# WorkerCount: 1
+# Number of worker threads, the maximum should not exceed the total number of configured accounts
+WorkerCount: 10
 
-# 账号配置，可配置多个用户，启动浏览器时会尝试自动登录，但不支持ReCaptcha或2FA。
-# 可以不配置账户，仅通过上传登录状态使用
+# Account configuration, multiple users can be configured. The browser will try to log in automatically when it starts, but it does not support ReCaptcha or 2FA.
+# You can choose not to configure an account and only use it by uploading the login status
 # Credentials:
-# - email: 'user1@sample.com'
-#   password: 'password'
+# - email: 'locmaymo4@gmail.com'
+# password: 'locloc11'
 # - email: 'user2@sample.com'
-#   password: 'password'
+# password: 'password'

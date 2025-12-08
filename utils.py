@@ -38,12 +38,16 @@ class Profiler:
         return self
 
     def save(self):
+        if not config.SaveLogs:
+            return
         logger.warning('Profiler[%s] Save Log', self.topic)
         with open(f'{LOGDIR}/{self.topic}.json', 'w') as fp:
             json.dump({'history': self.history}, fp, separators=(',', ': '))
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         if (not exc_type or not self.topic) and not config.Debug:
+            return
+        if not config.SaveLogs:
             return
         logger.warning('Profiler[%s] Save Log With Error: %s', self.topic, exc_val)
         with open(f'{LOGDIR}/{self.topic}.json', 'w') as fp:

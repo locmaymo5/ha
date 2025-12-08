@@ -107,12 +107,39 @@ async def generate_content(model: str, request_body: genai.GenerateContentReques
         future = asyncio.Future()
         await browser_pool.put_task(InterceptTask(prompt_history, future, profiler))
         profiler.span('fastapi: task scheduled')
-        headers, body = await future
+        
+        try:
+            headers, body = await future
+        except TimeoutError:
+            raise HTTPException(status_code=504, detail="Upstream Request Timeout (Worker timed out)")
+        except asyncio.CancelledError:
+            raise HTTPException(status_code=499, detail="Client Closed Request")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
         events = [event async for event in StreamGenerator(model, headers, body, profiler)]
 
         response = adapter.AiStudioStreamEventToGenAIResponse(events)
         if response.candidates:
+            # Gộp các text parts liền kề cùng loại (thought/text) để đảm bảo Markdown không bị vỡ
+            for candidate in response.candidates:
+                if candidate.content and candidate.content.parts:
+                    new_parts = []
+                    for part in candidate.content.parts:
+                        if not part.text:
+                            continue
+                        
+                        # Kiểm tra thuộc tính thought (nếu có), mặc định là False
+                        is_thought = getattr(part, 'thought', False)
+                        
+                        # Nếu part hiện tại cùng loại (thought/không thought) với part trước đó thì gộp
+                        if new_parts and getattr(new_parts[-1], 'thought', False) == is_thought:
+                            new_parts[-1].text += part.text
+                        else:
+                            new_parts.append(part)
+                    
+                    candidate.content.parts = new_parts
+
             response.candidates[-1].finishReason = genai.FinishReason.STOP
 
         return JSONResponse(content=response.model_dump(exclude_none=True))
@@ -132,7 +159,15 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
         future = asyncio.Future()
         await browser_pool.put_task(InterceptTask(prompt_history, future, profiler))
         profiler.span('fastapi: task scheduled')
-        headers, body = await future
+        
+        try:
+            headers, body = await future
+        except TimeoutError:
+            raise HTTPException(status_code=504, detail="Upstream Request Timeout (Worker timed out)")
+        except asyncio.CancelledError:
+            raise HTTPException(status_code=499, detail="Client Closed Request")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
         async def response_generator():
             async for event in StreamGenerator(model, headers, body, profiler):
