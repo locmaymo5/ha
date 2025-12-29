@@ -32,7 +32,7 @@ browser_pool = BrowserPool(credentialManager)
 # In-memory storage for files
 FILES = {}
 
-from models.aistudio import StreamEvent, StreamParser
+from models.aistudio import StreamEvent, StreamParser, ResponseError
 
 
 @asynccontextmanager
@@ -92,11 +92,9 @@ async def list_models_openai() -> openai_models.ModelList:
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_openai_token)])
 async def chat_completions(request: openai_models.ChatCompletionRequest):
-    # Convert OpenAI request to GenAI request
     genai_request = adapter.OpenAIRequestToGenAIRequest(request)
     model_name = request.model
     
-    # Reuse existing logic to schedule browser task
     request_id = adapter._randomPromptId()
     with Profiler(request_id) as profiler:
         profiler.span('openai: receive request', {'model': model_name})
@@ -104,7 +102,8 @@ async def chat_completions(request: openai_models.ChatCompletionRequest):
         prompt_history = adapter.GenAIRequestToAiStudioPromptHistory(model_name, genai_request, prompt_id=request_id)
         
         future = asyncio.Future()
-        await browser_pool.put_task(InterceptTask(prompt_history, future, profiler))
+        task = InterceptTask(prompt_history, future, profiler)
+        await browser_pool.put_task(task)
         
         try:
             headers, body = await future
@@ -113,34 +112,50 @@ async def chat_completions(request: openai_models.ChatCompletionRequest):
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
+        # Callback để handle rate limit
+        async def handle_rate_limit(model: str):
+            if task._worker:
+                await browser_pool.handle_rate_limit(task._worker, model)
+
         if request.stream:
             async def openai_stream():
                 chat_id = f"chatcmpl-{uuid.uuid4()}"
-                async for event in StreamGenerator(model_name, headers, body, profiler):
-                    genai_resp = adapter.AiStudioStreamEventToGenAIResponse(event)
-                    chunk = adapter.GenAIResponseToOpenAIChunk(genai_resp, model_name, chat_id)
-                    # Only yield if there is content or finish reason
-                    if chunk.choices[0].delta.content or chunk.choices[0].finish_reason:
-                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-                yield "data: [DONE]\n\n"
+                try:
+                    # Truyền task.email vào đây
+                    async for event in StreamGenerator(model_name, headers, body, profiler, on_rate_limit=handle_rate_limit, worker_email=task.email):
+                        genai_resp = adapter.AiStudioStreamEventToGenAIResponse(event)
+                        chunk = adapter.GenAIResponseToOpenAIChunk(genai_resp, model_name, chat_id)
+                        if chunk.choices[0].delta.content or chunk.choices[0].finish_reason:
+                            yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    yield "data: [DONE]\n\n"
+                except ResponseError as e:
+                    if e.is_rate_limit():
+                        error_data = {"error": {"message": str(e), "type": "rate_limit_error", "code": 429}}
+                        yield f"data: {json.dumps(error_data)}\n\n"
+                    else:
+                        raise
             
             return StreamingResponse(openai_stream(), media_type="text/event-stream")
         else:
-            # Non-streaming: accumulate response
             full_content = ""
             finish_reason = "stop"
             
-            async for event in StreamGenerator(model_name, headers, body, profiler):
-                genai_resp = adapter.AiStudioStreamEventToGenAIResponse(event)
-                if genai_resp.candidates:
-                    cand = genai_resp.candidates[0]
-                    if cand.content and cand.content.parts:
-                        for part in cand.content.parts:
-                            # Filter out thought
-                            if not getattr(part, 'thought', False) and part.text:
-                                full_content += part.text
-                    if cand.finishReason:
-                         finish_reason = str(cand.finishReason).lower()
+            try:
+                # Truyền task.email vào đây
+                async for event in StreamGenerator(model_name, headers, body, profiler, on_rate_limit=handle_rate_limit, worker_email=task.email):
+                    genai_resp = adapter.AiStudioStreamEventToGenAIResponse(event)
+                    if genai_resp.candidates:
+                        cand = genai_resp.candidates[0]
+                        if cand.content and cand.content.parts:
+                            for part in cand.content.parts:
+                                if not getattr(part, 'thought', False) and part.text:
+                                    full_content += part.text
+                        if cand.finishReason:
+                            finish_reason = str(cand.finishReason).lower()
+            except ResponseError as e:
+                if e.is_rate_limit():
+                    raise HTTPException(status_code=429, detail=str(e))
+                raise HTTPException(status_code=500, detail=str(e))
             
             resp = openai_models.ChatCompletionResponse(
                 id=f"chatcmpl-{uuid.uuid4()}",
@@ -158,12 +173,13 @@ async def chat_completions(request: openai_models.ChatCompletionRequest):
             return JSONResponse(content=resp.model_dump(exclude_none=True))
 
 
-async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, profiler: Profiler) -> AsyncGenerator[StreamEvent, None]:
+async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, profiler: Profiler, on_rate_limit: callable = None, worker_email: str = None) -> AsyncGenerator[StreamEvent, None]:
     url = config.AIStudioAPIUrl
     timeout = aiohttp.ClientTimeout(total=config.AioHTTPTimeout, connect=None, sock_connect=None, sock_read=None)
     async with aiohttp.ClientSession(timeout=timeout, connector=aiohttp.TCPConnector(ssl=False if AIOHTTP_PROXY else True)) as session:
 
-        profiler.span('aiohtpp: send request to aistudio', body)
+        # Thêm [email] vào log span
+        profiler.span(f'[{worker_email}] aiohtpp: send request to aistudio', body)
 
         resp = await session.post(
             url, headers=headers, data=body,
@@ -176,21 +192,25 @@ async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, p
             idx = 0
             async for chunk in resp.content.iter_any():
                 chunks.append(chunk)
-                profiler.span(f'aiohttp: chunk {idx}', chunk.decode())
+                # Thêm [email] vào log span của từng chunk
+                profiler.span(f'[{worker_email}] aiohttp: chunk {idx}', chunk.decode())
                 yield chunk
                 idx += 1
-        profiler.span('aiohttp: start stream response from aistudio')
+        
+        profiler.span(f'[{worker_email}] aiohttp: start stream response from aistudio')
         with profiler:
-            async for event in StreamParser(inner()):
-                yield event
-            profiler.span('aiohttp: finish stream response from aistudio')
+            try:
+                async for event in StreamParser(inner()):
+                    yield event
+            except ResponseError as e:
+                if e.is_rate_limit() and on_rate_limit:
+                    await on_rate_limit(model_name)
+                raise
+            profiler.span(f'[{worker_email}] aiohttp: finish stream response from aistudio')
 
 
 @app.post("/v1beta/models/{model}:generateContent", dependencies=[Depends(api_key_auth)])
 async def generate_content(model: str, request_body: genai.GenerateContentRequest, request: Request) -> Response:
-    # if not should_adapt(model):
-    #     return await forward_request(request)
-
     request_id = adapter._randomPromptId()
     with Profiler(request_id) as profiler:
         profiler.span('fastapi: receive request', {'model': model, 'request': request_body.model_dump()})
@@ -198,7 +218,8 @@ async def generate_content(model: str, request_body: genai.GenerateContentReques
         prompt_history = adapter.GenAIRequestToAiStudioPromptHistory(model, request_body, prompt_id=request_id)
         profiler.span('adapter: GenAIRequestToAiStudioPromptHistory')
         future = asyncio.Future()
-        await browser_pool.put_task(InterceptTask(prompt_history, future, profiler))
+        task = InterceptTask(prompt_history, future, profiler)
+        await browser_pool.put_task(task)
         profiler.span('fastapi: task scheduled')
         
         try:
@@ -210,7 +231,18 @@ async def generate_content(model: str, request_body: genai.GenerateContentReques
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
-        events = [event async for event in StreamGenerator(model, headers, body, profiler)]
+        # Callback để handle rate limit
+        async def handle_rate_limit(model_name: str):
+            if hasattr(task, '_worker') and task._worker:
+                await browser_pool.handle_rate_limit(task._worker, model_name)
+
+        try:
+            # Truyền task.email vào đây
+            events = [event async for event in StreamGenerator(model, headers, body, profiler, on_rate_limit=handle_rate_limit, worker_email=task.email)]
+        except ResponseError as e:
+            if e.is_rate_limit():
+                raise HTTPException(status_code=429, detail=str(e))
+            raise HTTPException(status_code=500, detail=str(e))
 
         response = adapter.AiStudioStreamEventToGenAIResponse(events)
         if response.candidates:
@@ -240,9 +272,6 @@ async def generate_content(model: str, request_body: genai.GenerateContentReques
 
 @app.post("/v1beta/models/{model}:streamGenerateContent", dependencies=[Depends(api_key_auth)])
 async def stream_generate_content(model: str, request_body: genai.GenerateContentRequest, request: Request) -> Response:
-    # if not should_adapt(model):
-    #     return await forward_request(request)
-
     request_id = adapter._randomPromptId()
     with Profiler(request_id) as profiler:
         profiler.span('fastapi: receive request', {'model': model, 'request': request_body.model_dump()})
@@ -250,7 +279,8 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
         prompt_history = adapter.GenAIRequestToAiStudioPromptHistory(model, request_body)
         profiler.span('adapter: GenAIRequestToAiStudioPromptHistory')
         future = asyncio.Future()
-        await browser_pool.put_task(InterceptTask(prompt_history, future, profiler))
+        task = InterceptTask(prompt_history, future, profiler)
+        await browser_pool.put_task(task)
         profiler.span('fastapi: task scheduled')
         
         try:
@@ -262,14 +292,25 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
+        # Callback để handle rate limit  
+        async def handle_rate_limit(model_name: str):
+            if hasattr(task, '_worker') and task._worker:
+                await browser_pool.handle_rate_limit(task._worker, model_name)
+
         async def response_generator():
-            async for event in StreamGenerator(model, headers, body, profiler):
-                response_chunk = adapter.AiStudioStreamEventToGenAIResponse(event)
-                # if not response_chunk.candidates:
-                #     continue
-                data = response_chunk.model_dump_json(exclude_none=True)
-                logging.debug('yield event %r', data)
-                yield f"data: {data}\n\n"
+            try:
+                # Truyền task.email vào đây
+                async for event in StreamGenerator(model, headers, body, profiler, on_rate_limit=handle_rate_limit, worker_email=task.email):
+                    response_chunk = adapter.AiStudioStreamEventToGenAIResponse(event)
+                    data = response_chunk.model_dump_json(exclude_none=True)
+                    logging.debug('yield event %r', data)
+                    yield f"data: {data}\n\n"
+            except ResponseError as e:
+                if e.is_rate_limit():
+                    error_response = {"error": {"code": 429, "message": str(e)}}
+                    yield f"data: {json.dumps(error_response)}\n\n"
+                else:
+                    raise
 
         return StreamingResponse(response_generator(), media_type="text/event-stream")
 

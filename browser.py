@@ -13,7 +13,7 @@ import string
 import aiohttp
 import contextlib
 import pathlib
-from models.aistudio import PromptHistory, flatten, inflate, StreamParser, Model, ListModelsResponse
+from models.aistudio import PromptHistory, flatten, inflate, StreamParser, Model, ListModelsResponse, ResponseError
 from datetime import datetime, timezone
 from camoufox.async_api import AsyncCamoufox, AsyncNewBrowser
 from playwright.async_api import Route, expect, async_playwright, BrowserContext, Browser, Page
@@ -58,6 +58,8 @@ class InterceptTask:
     prompt_history: PromptHistory
     future: asyncio.Future
     profiler: Profiler
+    email: str | None = None  # Thêm trường này để lưu email worker
+    _worker: 'BrowserWorker | None' = None # (Nếu bạn đã thêm từ bước trước)
 
 
 
@@ -69,6 +71,7 @@ class AccountInfo(TypedDict):
 class BrowserPool:
     queue: asyncio.Queue[InterceptTask]
     _workers: dict[asyncio.Task, 'BrowserWorker']
+    _rate_limited_credentials: set[str]  # Track credentials bị rate limit
 
     def __init__(self, credentialManager: CredentialManager, worker_count: int = config.WorkerCount, *, endpoint: str | None = None, loop=None):
         self._loop = loop
@@ -78,6 +81,8 @@ class BrowserPool:
         self._worker_count = min(worker_count, len(self._credMgr.credentials))
         self._workers = {}
         self._models: list[Model] = []
+        self._rate_limited_credentials = set()
+        self._worker_lock = asyncio.Lock()
 
     def set_Models(self, models: list[Model]):
         self._models = models
@@ -140,6 +145,76 @@ class BrowserPool:
     async def put_task(self, task: InterceptTask):
         await self.queue.put(task)
 
+    async def handle_rate_limit(self, worker: 'BrowserWorker', model: str):
+        """Handle rate limit: stop current worker and spawn new one if available"""
+        async with self._worker_lock:
+            worker.mark_rate_limited(model)
+            
+            # Thêm credential vào danh sách rate limited
+            if worker._credential.email:
+                self._rate_limited_credentials.add(worker._credential.email)
+            
+            # Tìm task của worker này
+            worker_task = None
+            for task, w in self._workers.items():
+                if w is worker:
+                    worker_task = task
+                    break
+            
+            if worker_task:
+                # Dừng worker hiện tại
+                logger.info(f'Stopping rate-limited worker: {worker._credential.email}')
+                await worker.stop()
+                
+                # Xóa khỏi danh sách workers
+                del self._workers[worker_task]
+                worker_task.cancel()
+            
+            # Tìm credential mới chưa bị rate limit
+            available_cred = None
+            for cred in self._credMgr.credentials:
+                if cred.email not in self._rate_limited_credentials:
+                    # Kiểm tra xem credential này đã có worker chưa
+                    already_used = any(
+                        w._credential.email == cred.email 
+                        for w in self._workers.values()
+                    )
+                    if not already_used:
+                        available_cred = cred
+                        break
+            
+            if available_cred and len(self._workers) < self._worker_count:
+                # Spawn worker mới
+                logger.info(f'Spawning new worker with credential: {available_cred.email}')
+                new_worker = BrowserWorker(
+                    credential=available_cred,
+                    pool=self,
+                    endpoint=self._endpoint,
+                    loop=self._loop
+                )
+                task = asyncio.create_task(
+                    new_worker.run(), 
+                    name=f"BrowserWorker-{available_cred.email}"
+                )
+                task.add_done_callback(self.worker_done_callback)
+                self._workers[task] = new_worker
+                
+                # Chờ worker mới ready
+                try:
+                    await asyncio.wait_for(new_worker.ready, timeout=60)
+                    logger.info(f'New worker {available_cred.email} is ready')
+                except asyncio.TimeoutError:
+                    logger.error(f'New worker {available_cred.email} failed to start')
+            else:
+                if not available_cred:
+                    logger.warning('No available credentials left!')
+                else:
+                    logger.info(f'Worker count at max ({self._worker_count}), not spawning new worker')
+
+    def get_available_worker_count(self) -> int:
+        """Get number of workers not rate limited"""
+        return sum(1 for w in self._workers.values() if not w._rate_limited)
+
 
 class BrowserWorker:
     _browser: BrowserContext | None
@@ -148,6 +223,8 @@ class BrowserWorker:
     _pool: BrowserPool
     status: str
     ready: asyncio.Future
+    _rate_limited: bool  # Thêm flag rate limit
+    _rate_limited_models: set[str]  # Track models bị rate limit
 
     def __init__(self, credential: Credential, pool: BrowserPool, *, endpoint: str|None = None, loop=None):
         self._loop = loop
@@ -157,6 +234,21 @@ class BrowserWorker:
         self._pages = []
         self._pool = pool
         self.ready = asyncio.Future()
+        self._rate_limited = False
+        self._rate_limited_models = set()
+
+    def is_rate_limited_for_model(self, model: str) -> bool:
+        """Check if this worker is rate limited for a specific model"""
+        return self._rate_limited or model in self._rate_limited_models
+    
+    def mark_rate_limited(self, model: str | None = None):
+        """Mark this worker as rate limited"""
+        if model:
+            self._rate_limited_models.add(model)
+            logger.warning(f'Worker {self._credential.email} rate limited for model: {model}')
+        else:
+            self._rate_limited = True
+            logger.warning(f'Worker {self._credential.email} fully rate limited')
 
     async def browser(self) -> BrowserContext:
         if not self._browser:
@@ -302,11 +394,15 @@ class BrowserWorker:
         while True:
             try:
                 task = await self._pool.queue.get()
-                task.profiler.span('worker: task fetched')
+                
+                # Gán email của worker hiện tại vào task
+                task.email = self._credential.email
+                if hasattr(task, '_worker'): task._worker = self
+
+                task.profiler.span(f'worker: task fetched by {self._credential.email}')
                 await self.InterceptRequest(task.prompt_history, task.future, task.profiler)
             except Exception as exc:
                 task.profiler.span('worker: failed with exception', traceback.format_exception(exc))
-                # Kiểm tra xem future đã xong chưa trước khi set exception để tránh InvalidStateError
                 if not task.future.done():
                     task.future.set_exception(exc)
                 logger.error('Worker %s error processing task: %s', self._credential.email, exc)

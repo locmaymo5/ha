@@ -349,13 +349,18 @@ class ResponseErrorDetail():
 
 
 @dataclasses.dataclass(kw_only=True)
-class ResponseError(BaseException):
+class ResponseError(Exception):
     code: int
     message: str
     details: list[ResponseErrorDetail] | None = None
 
     def __str__(self) -> str:
         return f'<AIStudio Response Error [{self.code}]{self.message}'
+
+    def is_rate_limit(self) -> bool:
+        """Check if this error is a rate limit error"""
+        return self.code == 8 or "exceeded your current quota" in self.message.lower()
+
 
 @dataclasses.dataclass(kw_only=True)
 class GenerateContentResponse():
