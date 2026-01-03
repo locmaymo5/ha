@@ -223,7 +223,6 @@ class BrowserWorker:
                     main_world_eval=True,
                     enable_cache=True,
                     locale="US",
-                    os="windows",
                     proxy=CAMOUFOX_PROXY,
                     geoip=True if CAMOUFOX_PROXY else False,
                 ).__aenter__())
