@@ -71,7 +71,7 @@ class AccountInfo(TypedDict):
 class BrowserPool:
     queue: asyncio.Queue[InterceptTask]
     _workers: dict[asyncio.Task, 'BrowserWorker']
-    _rate_limited_credentials: set[str]  # Track credentials bị rate limit
+    _next_cred_idx: int # Index để theo dõi credential tiếp theo
 
     def __init__(self, credentialManager: CredentialManager, worker_count: int = config.WorkerCount, *, endpoint: str | None = None, loop=None):
         self._loop = loop
@@ -81,8 +81,8 @@ class BrowserPool:
         self._worker_count = min(worker_count, len(self._credMgr.credentials))
         self._workers = {}
         self._models: list[Model] = []
-        self._rate_limited_credentials = set()
         self._worker_lock = asyncio.Lock()
+        self._next_cred_idx = 0 # Bắt đầu từ 0
 
     def set_Models(self, models: list[Model]):
         self._models = models
@@ -102,20 +102,9 @@ class BrowserPool:
                 worker.ready.set_result(None)
 
     async def start(self):
-
-        for cred in self._credMgr.credentials[:self._worker_count]:
-
-            worker = BrowserWorker(
-                credential=cred,
-                pool=self,
-                endpoint=self._endpoint,
-                loop=self._loop
-            )
-            logger.info('spawn worker with %s', cred.email)
-            task = asyncio.create_task(worker.run(), name=f"BrowserWorker-{cred.email}")
-            task.add_done_callback(self.worker_done_callback)
-            self._workers[task] = worker
-
+        # Khởi động số lượng worker ban đầu
+        for i in range(self._worker_count):
+            await self._spawn_worker()
             # sleep 10s。防止一次启动太多浏览器
             await asyncio.sleep(10)
 
@@ -138,6 +127,28 @@ class BrowserPool:
         logger.info('%d Workers Up and Running', len(self._workers))
         return self
 
+    async def _spawn_worker(self):
+        """Hàm nội bộ để spawn worker tiếp theo theo vòng tròn"""
+        if not self._credMgr.credentials:
+            return
+
+        # Lấy credential theo vòng tròn
+        cred = self._credMgr.credentials[self._next_cred_idx]
+        # Cập nhật index cho lần sau (Round Robin)
+        self._next_cred_idx = (self._next_cred_idx + 1) % len(self._credMgr.credentials)
+
+        worker = BrowserWorker(
+            credential=cred,
+            pool=self,
+            endpoint=self._endpoint,
+            loop=self._loop
+        )
+        logger.info('Spawning worker with %s (Round Robin)', cred.email)
+        task = asyncio.create_task(worker.run(), name=f"BrowserWorker-{cred.email}")
+        task.add_done_callback(self.worker_done_callback)
+        self._workers[task] = worker
+        return worker
+
     async def stop(self):
         await asyncio.gather(*[
             worker.stop() for worker in self._workers.values()], return_exceptions=True)
@@ -146,14 +157,12 @@ class BrowserPool:
         await self.queue.put(task)
 
     async def handle_rate_limit(self, worker: 'BrowserWorker', model: str):
-        """Handle rate limit: stop current worker and spawn new one if available"""
+        """
+        Xử lý rate limit: 
+        1. Tắt worker bị lỗi ngay lập tức.
+        2. Mở worker mới ở background (không chờ đợi).
+        """
         async with self._worker_lock:
-            worker.mark_rate_limited(model)
-            
-            # Thêm credential vào danh sách rate limited
-            if worker._credential.email:
-                self._rate_limited_credentials.add(worker._credential.email)
-            
             # Tìm task của worker này
             worker_task = None
             for task, w in self._workers.items():
@@ -162,59 +171,32 @@ class BrowserPool:
                     break
             
             if worker_task:
-                # Dừng worker hiện tại
-                logger.info(f'Stopping rate-limited worker: {worker._credential.email}')
-                await worker.stop()
+                logger.warning(f'Rate limit hit for {worker._credential.email}. Rotating to next credential.')
                 
-                # Xóa khỏi danh sách workers
+                # 1. Dừng worker hiện tại
+                # Xóa khỏi danh sách quản lý trước để không nhận task mới
                 del self._workers[worker_task]
+                
+                # Chạy việc stop ở background để không block request hiện tại
+                asyncio.create_task(worker.stop())
                 worker_task.cancel()
             
-            # Tìm credential mới chưa bị rate limit
-            available_cred = None
-            for cred in self._credMgr.credentials:
-                if cred.email not in self._rate_limited_credentials:
-                    # Kiểm tra xem credential này đã có worker chưa
-                    already_used = any(
-                        w._credential.email == cred.email 
-                        for w in self._workers.values()
-                    )
-                    if not already_used:
-                        available_cred = cred
-                        break
-            
-            if available_cred and len(self._workers) < self._worker_count:
-                # Spawn worker mới
-                logger.info(f'Spawning new worker with credential: {available_cred.email}')
-                new_worker = BrowserWorker(
-                    credential=available_cred,
-                    pool=self,
-                    endpoint=self._endpoint,
-                    loop=self._loop
-                )
-                task = asyncio.create_task(
-                    new_worker.run(), 
-                    name=f"BrowserWorker-{available_cred.email}"
-                )
-                task.add_done_callback(self.worker_done_callback)
-                self._workers[task] = new_worker
-                
-                # Chờ worker mới ready
-                try:
-                    await asyncio.wait_for(new_worker.ready, timeout=60)
-                    logger.info(f'New worker {available_cred.email} is ready')
-                except asyncio.TimeoutError:
-                    logger.error(f'New worker {available_cred.email} failed to start')
-            else:
-                if not available_cred:
-                    logger.warning('No available credentials left!')
-                else:
-                    logger.info(f'Worker count at max ({self._worker_count}), not spawning new worker')
+            # 2. Spawn worker mới (Fire and forget - không await ready)
+            # Việc này giúp trả về 429 cho client ngay lập tức mà không cần chờ trình duyệt mới bật lên
+            asyncio.create_task(self._spawn_worker_and_wait())
+
+    async def _spawn_worker_and_wait(self):
+        """Helper để spawn và log kết quả, chạy ở background"""
+        try:
+            worker = await self._spawn_worker()
+            if worker:
+                await worker.ready
+                logger.info(f'New rotated worker {worker._credential.email} is READY')
+        except Exception as e:
+            logger.error(f"Failed to spawn rotated worker: {e}")
 
     def get_available_worker_count(self) -> int:
-        """Get number of workers not rate limited"""
-        return sum(1 for w in self._workers.values() if not w._rate_limited)
-
+        return len(self._workers)
 
 class BrowserWorker:
     _browser: BrowserContext | None
@@ -223,8 +205,6 @@ class BrowserWorker:
     _pool: BrowserPool
     status: str
     ready: asyncio.Future
-    _rate_limited: bool  # Thêm flag rate limit
-    _rate_limited_models: set[str]  # Track models bị rate limit
 
     def __init__(self, credential: Credential, pool: BrowserPool, *, endpoint: str|None = None, loop=None):
         self._loop = loop
@@ -234,21 +214,6 @@ class BrowserWorker:
         self._pages = []
         self._pool = pool
         self.ready = asyncio.Future()
-        self._rate_limited = False
-        self._rate_limited_models = set()
-
-    def is_rate_limited_for_model(self, model: str) -> bool:
-        """Check if this worker is rate limited for a specific model"""
-        return self._rate_limited or model in self._rate_limited_models
-    
-    def mark_rate_limited(self, model: str | None = None):
-        """Mark this worker as rate limited"""
-        if model:
-            self._rate_limited_models.add(model)
-            logger.warning(f'Worker {self._credential.email} rate limited for model: {model}')
-        else:
-            self._rate_limited = True
-            logger.warning(f'Worker {self._credential.email} fully rate limited')
 
     async def browser(self) -> BrowserContext:
         if not self._browser:
@@ -258,6 +223,7 @@ class BrowserWorker:
                     main_world_eval=True,
                     enable_cache=True,
                     locale="US",
+                    os="windows",
                     proxy=CAMOUFOX_PROXY,
                     geoip=True if CAMOUFOX_PROXY else False,
                 ).__aenter__())

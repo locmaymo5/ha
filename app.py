@@ -203,8 +203,13 @@ async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, p
                 async for event in StreamParser(inner()):
                     yield event
             except ResponseError as e:
-                if e.is_rate_limit() and on_rate_limit:
-                    await on_rate_limit(model_name)
+                if e.is_rate_limit():
+                    profiler.span(f'[{worker_email}] Rate limit detected, triggering rotation')
+                    if on_rate_limit:
+                        # Gọi hàm này để trigger việc đổi worker ở background
+                        # Lưu ý: handle_rate_limit trong browser.py giờ đã chạy rất nhanh (không chờ browser bật)
+                        await on_rate_limit(model_name)
+                # Luôn raise lỗi để thoát khỏi hàm này và trả về response cho client
                 raise
             profiler.span(f'[{worker_email}] aiohttp: finish stream response from aistudio')
 
@@ -295,11 +300,11 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
         # Callback để handle rate limit  
         async def handle_rate_limit(model_name: str):
             if hasattr(task, '_worker') and task._worker:
+                # Gọi vào pool để xoay vòng worker
                 await browser_pool.handle_rate_limit(task._worker, model_name)
 
         async def response_generator():
             try:
-                # Truyền task.email vào đây
                 async for event in StreamGenerator(model, headers, body, profiler, on_rate_limit=handle_rate_limit, worker_email=task.email):
                     response_chunk = adapter.AiStudioStreamEventToGenAIResponse(event)
                     data = response_chunk.model_dump_json(exclude_none=True)
@@ -307,7 +312,14 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
                     yield f"data: {data}\n\n"
             except ResponseError as e:
                 if e.is_rate_limit():
-                    error_response = {"error": {"code": 429, "message": str(e)}}
+                    # Trả về lỗi 429 NGAY LẬP TỨC cho client
+                    error_response = {
+                        "error": {
+                            "code": 429, 
+                            "message": "Rate limit exceeded. Server is rotating credentials. Please retry in a few seconds.",
+                            "status": "RESOURCE_EXHAUSTED"
+                        }
+                    }
                     yield f"data: {json.dumps(error_response)}\n\n"
                 else:
                     raise
