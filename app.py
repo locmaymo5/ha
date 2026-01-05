@@ -103,12 +103,19 @@ async def chat_completions(request: openai_models.ChatCompletionRequest):
         
         future = asyncio.Future()
         task = InterceptTask(prompt_history, future, profiler)
-        await browser_pool.put_task(task)
         
+        # Thêm timeout cho việc chờ worker nhận task và xử lý
+        # Nếu quá 180s mà không có kết quả -> coi như hệ thống bị kẹt
         try:
-            headers, body = await future
-        except TimeoutError:
-            raise HTTPException(status_code=504, detail="Upstream Request Timeout")
+            await browser_pool.put_task(task)
+            
+            # Chờ kết quả với timeout tổng
+            headers, body = await asyncio.wait_for(future, timeout=180) 
+        except asyncio.TimeoutError:
+            # Nếu timeout, hủy task để worker không nhận nhầm sau này
+            if not future.done():
+                future.cancel()
+            raise HTTPException(status_code=504, detail="Request Timed Out (System Overloaded or Stuck)")
         except Exception as e:
              raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
@@ -224,13 +231,14 @@ async def generate_content(model: str, request_body: genai.GenerateContentReques
         profiler.span('adapter: GenAIRequestToAiStudioPromptHistory')
         future = asyncio.Future()
         task = InterceptTask(prompt_history, future, profiler)
-        await browser_pool.put_task(task)
-        profiler.span('fastapi: task scheduled')
         
         try:
-            headers, body = await future
-        except TimeoutError:
-            raise HTTPException(status_code=504, detail="Upstream Request Timeout (Worker timed out)")
+            await browser_pool.put_task(task)
+            # Thêm timeout
+            headers, body = await asyncio.wait_for(future, timeout=180)
+        except asyncio.TimeoutError:
+            if not future.done(): future.cancel()
+            raise HTTPException(status_code=504, detail="Request Timed Out (Worker timed out)")
         except asyncio.CancelledError:
             raise HTTPException(status_code=499, detail="Client Closed Request")
         except Exception as e:
@@ -285,13 +293,14 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
         profiler.span('adapter: GenAIRequestToAiStudioPromptHistory')
         future = asyncio.Future()
         task = InterceptTask(prompt_history, future, profiler)
-        await browser_pool.put_task(task)
-        profiler.span('fastapi: task scheduled')
         
         try:
-            headers, body = await future
-        except TimeoutError:
-            raise HTTPException(status_code=504, detail="Upstream Request Timeout (Worker timed out)")
+            await browser_pool.put_task(task)
+            # Thêm timeout
+            headers, body = await asyncio.wait_for(future, timeout=180)
+        except asyncio.TimeoutError:
+            if not future.done(): future.cancel()
+            raise HTTPException(status_code=504, detail="Request Timed Out (Worker timed out)")
         except asyncio.CancelledError:
             raise HTTPException(status_code=499, detail="Client Closed Request")
         except Exception as e:

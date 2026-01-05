@@ -356,22 +356,43 @@ class BrowserWorker:
             return
         logger.info('Worker %s is ready', self._credential.email)
         self.ready.set_result(accountInfo)
+        
         while True:
             try:
+                # Lấy task từ queue
                 task = await self._pool.queue.get()
                 
-                # Gán email của worker hiện tại vào task
+                # Kiểm tra xem task đã bị cancel (do timeout ở app.py) chưa
+                if task.future.done():
+                    logger.warning(f"Worker {self._credential.email} picked up a cancelled task, skipping.")
+                    continue
+
                 task.email = self._credential.email
                 if hasattr(task, '_worker'): task._worker = self
 
                 task.profiler.span(f'worker: task fetched by {self._credential.email}')
-                await self.InterceptRequest(task.prompt_history, task.future, task.profiler)
+                
+                # Thêm timeout cứng cho việc xử lý 1 request trong worker
+                # Nếu quá 120s mà InterceptRequest chưa xong -> Kill worker này để tránh treo
+                try:
+                    async with asyncio.timeout(120):
+                        await self.InterceptRequest(task.prompt_history, task.future, task.profiler)
+                except asyncio.TimeoutError:
+                    logger.error(f"Worker {self._credential.email} HUNG processing request. Restarting worker.")
+                    if not task.future.done():
+                        task.future.set_exception(TimeoutError("Worker processing hung"))
+                    
+                    # Thoát vòng lặp để worker này kết thúc, trigger worker_done_callback -> spawn worker mới
+                    break 
+
             except Exception as exc:
                 task.profiler.span('worker: failed with exception', traceback.format_exception(exc))
                 if not task.future.done():
                     task.future.set_exception(exc)
                 logger.error('Worker %s error processing task: %s', self._credential.email, exc)
-                # Không raise exception để vòng lặp while True tiếp tục chạy và xử lý task tiếp theo
+                # Nếu lỗi quá nghiêm trọng (ví dụ mất kết nối browser), cũng nên break để restart
+                if "Target closed" in str(exc) or "Connection closed" in str(exc):
+                     break
 
     async def InterceptRequest(self, prompt_history: PromptHistory, future: asyncio.Future, profiler: Profiler, timeout: int=120):
         prompt_id = prompt_history.prompt.uri.split('/')[-1]
@@ -422,15 +443,45 @@ class BrowserWorker:
             async with self.page() as page:
                 profiler.span('Page: Created')
                 await page.route("**/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/*", handle_route)
-                await page.goto(f'{config.AIStudioUrl}/prompts/{prompt_id}')
+                
+                # Thêm timeout cho goto
+                try:
+                    await page.goto(f'{config.AIStudioUrl}/prompts/{prompt_id}', timeout=30000) # 30s timeout load trang
+                except Exception as e:
+                    profiler.span(f'Page: Load Failed {str(e)}')
+                    raise e
+
                 profiler.span('Page: Loaded')
                 last_turn = page.locator('ms-chat-turn').last
                 await expect(last_turn.locator('ms-text-chunk')).to_have_text('(placeholder)', timeout=20000)
                 profiler.span('Page: Placeholder Visible')
-                if await page.locator('.glue-cookie-notification-bar__reject').is_visible():
-                    await page.locator('.glue-cookie-notification-bar__reject').click()
-                if await page.locator('button[aria-label="Close run settings panel"]').is_visible():
-                    await page.locator('button[aria-label="Close run settings panel"]').click(force=True)
+                
+                # --- SỬA ĐOẠN NÀY ---
+                # Xử lý Cookie Banner (nếu có)
+                try:
+                    cookie_reject = page.locator('.glue-cookie-notification-bar__reject')
+                    if await cookie_reject.is_visible(timeout=1000):
+                        await cookie_reject.click(timeout=2000)
+                except Exception:
+                    pass
+
+                # Xử lý Settings Panel (Thủ phạm gây lỗi bên Native)
+                # Dùng try-except và timeout ngắn. Nếu click thất bại, code sẽ bỏ qua và chạy tiếp xuống dưới
+                # thay vì treo worker vĩnh viễn.
+                try:
+                    settings_btn = page.locator('button[aria-label="Close run settings panel"]')
+                    if await settings_btn.is_visible(timeout=1500):
+                        # Chỉ chờ click tối đa 2s
+                        await settings_btn.click(force=True, timeout=2000)
+                        profiler.span('Page: Settings Panel Closed')
+                except Exception as e:
+                    # Log warning nhưng KHÔNG raise lỗi để luồng chính tiếp tục
+                    logger.warning(f"Worker {self._credential.email}: Could not close settings panel (Native UI), ignoring. Error: {e}")
+
+                # XÓA ĐOẠN CODE CŨ GÂY LỖI NÀY:
+                # if await page.locator('button[aria-label="Close run settings panel"]').is_visible():
+                #     await page.locator('button[aria-label="Close run settings panel"]').click(force=True)
+                # --- HẾT SỬA ---
                 
                 # Đảm bảo nút rerun hiện lên bằng cách hover
                 await last_turn.hover()
