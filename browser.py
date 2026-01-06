@@ -392,7 +392,7 @@ class BrowserWorker:
                 logger.error('Worker %s error processing task: %s', self._credential.email, exc)
                 # Nếu lỗi quá nghiêm trọng (ví dụ mất kết nối browser), cũng nên break để restart
                 if "Target closed" in str(exc) or "Connection closed" in str(exc):
-                     break
+                    break
 
     async def InterceptRequest(self, prompt_history: PromptHistory, future: asyncio.Future, profiler: Profiler, timeout: int=120):
         prompt_id = prompt_history.prompt.uri.split('/')[-1]
@@ -452,6 +452,8 @@ class BrowserWorker:
                     raise e
 
                 profiler.span('Page: Loaded')
+                # in ra prompt history để debug
+                logger.debug(f"Prompt History for {prompt_id}: {json.dumps(flatten(prompt_history), indent=2)}")
                 last_turn = page.locator('ms-chat-turn').last
                 await expect(last_turn.locator('ms-text-chunk')).to_have_text('(placeholder)', timeout=20000)
                 profiler.span('Page: Placeholder Visible')
