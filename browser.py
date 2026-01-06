@@ -452,9 +452,9 @@ class BrowserWorker:
                     raise e
 
                 profiler.span('Page: Loaded')
-                # in ra prompt history để debug
-                logger.debug(f"Prompt History for {prompt_id}: {json.dumps(flatten(prompt_history), indent=2)}")
                 last_turn = page.locator('ms-chat-turn').last
+                # in ra xem last turn nội dung xem có phải là placeholder không
+                logger.debug(f"Last Turn Content: {await last_turn.locator('ms-text-chunk').inner_text()}")
                 await expect(last_turn.locator('ms-text-chunk')).to_have_text('(placeholder)', timeout=20000)
                 profiler.span('Page: Placeholder Visible')
                 
