@@ -193,6 +193,19 @@ async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, p
             proxy=AIOHTTP_PROXY, proxy_auth=AIOHTTP_PROXY_AUTH,
         )
 
+        # KIỂM TRA STATUS TRƯỚC KHI PARSE CHUNKS
+        if resp.status != 200:
+            error_text = await resp.text()
+            profiler.span(f'[{worker_email}] aiohttp error: status {resp.status}', error_text)
+            
+            # Nếu gặp 429 hoặc 403 (Forbidden - Cookie die), thực hiện xoay vòng
+            if resp.status in (403, 429):
+                if on_rate_limit:
+                    await on_rate_limit(model_name)
+            
+            # Sửa lỗi ResponseError không nhận status_code (truyền message đơn giản)
+            raise ResponseError(f"AIStudio Error {resp.status}: {error_text}")
+
         chunks: list[bytes] = []
 
         async def inner():

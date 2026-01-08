@@ -92,14 +92,26 @@ class BrowserPool:
         return self._models
 
     def worker_done_callback(self, task: asyncio.Task) -> None:
-        if exc := task.exception():
-            logger.error('worker %s failed with exception', task.get_name(), exc_info=exc)
-        else:
-            logger.info('worker %s exit normally', task.get_name())
+        try:
+            # Kiểm tra lỗi mà không làm crash callback
+            if task.cancelled():
+                logger.warning('worker %s was cancelled', task.get_name())
+            elif exc := task.exception():
+                logger.error('worker %s failed with exception', task.get_name(), exc_info=exc)
+            else:
+                logger.info('worker %s exit normally', task.get_name())
+        except Exception as e:
+            logger.error('Error in worker_done_callback: %s', e)
+        
+        # Luôn dọn dẹp và spawn lại worker mới
         if worker := self._workers.pop(task, None):
             asyncio.create_task(worker.stop())
             if not worker.ready.done():
                 worker.ready.set_result(None)
+            
+            # Tự động spawn worker mới để thay thế
+            logger.warning("Spawning a replacement worker...")
+            asyncio.create_task(self._spawn_worker())
 
     async def start(self):
         # Khởi động số lượng worker ban đầu
@@ -355,16 +367,14 @@ class BrowserWorker:
             await self.stop()
             return
         logger.info('Worker %s is ready', self._credential.email)
-        self.ready.set_result(accountInfo)
+        if not self.ready.done():
+            self.ready.set_result(accountInfo)
         
         while True:
             try:
-                # Lấy task từ queue
                 task = await self._pool.queue.get()
-                
-                # Kiểm tra xem task đã bị cancel (do timeout ở app.py) chưa
+                # Nếu task đã bị hủy từ phía app.py (timeout), bỏ qua luôn
                 if task.future.done():
-                    logger.warning(f"Worker {self._credential.email} picked up a cancelled task, skipping.")
                     continue
 
                 task.email = self._credential.email
@@ -385,6 +395,11 @@ class BrowserWorker:
                     # Thoát vòng lặp để worker này kết thúc, trigger worker_done_callback -> spawn worker mới
                     break 
 
+            except asyncio.CancelledError:
+                # Quan trọng: Khi task bị hủy, đóng trình duyệt và thoát để spawn cái mới
+                logger.warning(f"Worker {self._credential.email} cancelled. Closing...")
+                await self.stop()
+                break 
             except Exception as exc:
                 task.profiler.span('worker: failed with exception', traceback.format_exception(exc))
                 if not task.future.done():
