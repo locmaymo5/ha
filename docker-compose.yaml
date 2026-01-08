@@ -1,15 +1,19 @@
 services:
   hagmi:
-    # build:
-    #   context: .
-    #   dockerfile: Dockerfile
-    image: ghcr.io/wgd-ng/hagmi
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # image: ghcr.io/wgd-ng/hagmi # Comment lại để dùng build local
     restart: unless-stopped
-    environment:
-      - BROWSER_WORKER_COUNT=1
+    # Xóa environment BROWSER_WORKER_COUNT để ưu tiên giá trị WorkerCount trong config.yaml
     volumes:
       - ./states:/app/states
       - ./gemini_logs:/app/gemini_logs
       - ./config.yaml:/app/config.yaml
     ports:
       - 8000:8000
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'        # Sử dụng tối đa 2 CPU
+          memory: 10700M    # Giới hạn 10.7GB RAM (Chừa lại 1GB cho hệ thống)
