@@ -3,9 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # image: ghcr.io/wgd-ng/hagmi # Comment lại để dùng build local
     restart: unless-stopped
-    # Xóa environment BROWSER_WORKER_COUNT để ưu tiên giá trị WorkerCount trong config.yaml
+    # Sử dụng lệnh timeout để tự kết thúc sau 30 phút (1800 giây)
+    command: ["sh", "-c", "timeout 1800s uv run python app.py"]
     volumes:
       - ./states:/app/states
       - ./gemini_logs:/app/gemini_logs
