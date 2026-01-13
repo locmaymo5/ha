@@ -15,7 +15,7 @@ AiohttpTimeout: 500
 
 # uvicorn's listening address and directory, only effective when running through app.py, not effective when starting through uvicorn
 UvicornHost: '0.0.0.0'
-UvicornPort: 8000
+UvicornPort: 7860
 
 # !!! The API Key for authentication must be changed!!!
 AuthKey: 'YOUR_API_KEY'
