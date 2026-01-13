@@ -221,7 +221,7 @@ async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, p
             async for chunk in resp.content.iter_any():
                 chunks.append(chunk)
                 # Thêm [email] vào log span của từng chunk
-                profiler.span(f'[{worker_email}] aiohttp: chunk {idx}', chunk.decode())
+                # profiler.span(f'[{worker_email}] aiohttp: chunk {idx}', chunk.decode())
                 yield chunk
                 idx += 1
         
@@ -338,7 +338,7 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
                 async for event in StreamGenerator(model, headers, body, profiler, on_rate_limit=handle_rate_limit, worker_email=task.email):
                     response_chunk = adapter.AiStudioStreamEventToGenAIResponse(event)
                     data = response_chunk.model_dump_json(exclude_none=True)
-                    logging.debug('yield event %r', data)
+                    # logging.debug('yield event %r', data)
                     yield f"data: {data}\n\n"
             except (ResponseError, HTTPException) as e:
                 status_code = getattr(e, 'status_code', 500)
