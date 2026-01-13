@@ -1,0 +1,43 @@
+# Debug switch, enabling it will change some behaviors, not recommended to be enabled in deployment
+Debug: true
+
+# Log directory, when debugging is enabled, detailed records of erroneous requests will be saved to this directory, there is a risk of leaking conversations in production
+LogDir: './gemini_logs'
+# Enable or disable saving logs to disk
+SaveLogs: false
+# Directory to save login status files
+StatesDir: './states'
+# AI Studio's address configuration, not recommended to change
+AIStudioAPIUrl: 'https://alkalimakersuite-pa.clients6.google.com/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent'
+AIStudioUrl: 'https://aistudio.google.com'
+AIStudioChatUrl: 'https://aistudio.google.com/prompts/new_chat'
+AiohttpTimeout: 500
+
+# uvicorn's listening address and directory, only effective when running through app.py, not effective when starting through uvicorn
+UvicornHost: '0.0.0.0'
+UvicornPort: 8000
+
+# !!! The API Key for authentication must be changed!!!
+AuthKey: 'YOUR_API_KEY'
+
+# Headless browser configuration, optional true, false or virtual display 'virtual'
+Headless: 'false'
+
+# Proxy configuration, optional socks5 or http proxy, socks5 proxy does not support username and password authentication
+# proxy:
+# server: 'socks5://127.0.0.1:7070'
+# Proxy:
+#   server: 'http://113.160.166.81:35710'
+#   username: '1701x55'
+#   password: 'w1046'
+
+# Number of worker threads, the maximum should not exceed the total number of configured accounts
+WorkerCount: 2
+
+# Account configuration, multiple users can be configured. The browser will try to log in automatically when it starts, but it does not support ReCaptcha or 2FA.
+# You can choose not to configure an account and only use it by uploading the login status
+# Credentials:
+# - email: 'locmaymo4@gmail.com'
+# password: 'locloc11'
+# - email: 'user2@sample.com'
+# password: 'password'

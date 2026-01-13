@@ -210,5 +210,5 @@ __marimo__/
 # Project Specific Configuration
 # states/
 gemini_logs/
-config.yaml
+# config.yaml
 states-all/
