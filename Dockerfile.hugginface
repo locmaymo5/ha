@@ -1,0 +1,31 @@
+FROM python:3.13
+
+# Thiết lập biến môi trường cho UV và Port của Hugging Face
+ENV UV_PROJECT_ENVIRONMENT=/usr/local
+ENV PORT=7860
+
+WORKDIR /app
+
+# 1. Cài đặt uv
+RUN pip install uv --no-cache-dir
+
+# 2. Clone repository private sử dụng Secret của Hugging Face
+RUN --mount=type=secret,id=CLONE,mode=0444,required=true \
+    git clone https://$(cat /run/secrets/CLONE)@github.com/locmaymo/HAGMI.git .
+
+# 3. Cài đặt các dependencies từ repo vừa clone về
+# Không dùng --mount bind vì file đã có sẵn trong container sau khi clone
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-cache-dir
+
+# 4. Cài đặt trình duyệt cho Playwright và Camoufox
+RUN uv run playwright install firefox --with-deps && uv run camoufox fetch
+
+# 5. Tạo các thư mục cần thiết nếu chưa có (tránh lỗi permission)
+RUN mkdir -p /app/states /app/gemini_logs && chmod -R 777 /app
+
+# Expose port 7860 cho Hugging Face
+EXPOSE 7860
+
+# Chạy ứng dụng
+CMD ["uv", "run", "python", "app.py"]
