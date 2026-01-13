@@ -21,7 +21,7 @@ UvicornPort: 8000
 AuthKey: 'YOUR_API_KEY'
 
 # Headless browser configuration, optional true, false or virtual display 'virtual'
-Headless: 'false'
+Headless: 'true'
 
 # Proxy configuration, optional socks5 or http proxy, socks5 proxy does not support username and password authentication
 # proxy:
@@ -32,7 +32,7 @@ Headless: 'false'
 #   password: 'w1046'
 
 # Number of worker threads, the maximum should not exceed the total number of configured accounts
-WorkerCount: 3
+WorkerCount: 2
 
 # Account configuration, multiple users can be configured. The browser will try to log in automatically when it starts, but it does not support ReCaptcha or 2FA.
 # You can choose not to configure an account and only use it by uploading the login status
