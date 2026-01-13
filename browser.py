@@ -233,7 +233,7 @@ class BrowserWorker:
                 _browser = typing.cast(Browser, await AsyncCamoufox(
                     headless=config.Headless,
                     main_world_eval=True,
-                    enable_cache=True,
+                    enable_cache=False,
                     locale="US",
                     proxy=CAMOUFOX_PROXY,
                     geoip=True if CAMOUFOX_PROXY else False,
@@ -473,7 +473,6 @@ class BrowserWorker:
                 await expect(last_turn.locator('ms-text-chunk')).to_have_text('(placeholder)', timeout=20000)
                 profiler.span('Page: Placeholder Visible')
                 
-                # --- SỬA ĐOẠN NÀY ---
                 # Xử lý Cookie Banner (nếu có)
                 try:
                     cookie_reject = page.locator('.glue-cookie-notification-bar__reject')
@@ -482,30 +481,37 @@ class BrowserWorker:
                 except Exception:
                     pass
 
-                # Xử lý Settings Panel (Thủ phạm gây lỗi bên Native)
-                # Dùng try-except và timeout ngắn. Nếu click thất bại, code sẽ bỏ qua và chạy tiếp xuống dưới
-                # thay vì treo worker vĩnh viễn.
-                try:
-                    settings_btn = page.locator('button[aria-label="Close run settings panel"]')
-                    if await settings_btn.is_visible(timeout=1500):
-                        # Chỉ chờ click tối đa 2s
-                        await settings_btn.click(force=True, timeout=2000)
-                        profiler.span('Page: Settings Panel Closed')
-                except Exception as e:
-                    # Log warning nhưng KHÔNG raise lỗi để luồng chính tiếp tục
-                    logger.warning(f"Worker {self._credential.email}: Could not close settings panel (Native UI), ignoring. Error: {e}")
+                # # Xử lý Settings Panel (Thủ phạm gây lỗi bên Native)
+                # # Dùng try-except và timeout ngắn. Nếu click thất bại, code sẽ bỏ qua và chạy tiếp xuống dưới
+                # # thay vì treo worker vĩnh viễn.
+                # try:
+                #     settings_btn = page.locator('button[aria-label="Close run settings panel"]')
+                #     if await settings_btn.is_visible(timeout=1500):
+                #         # Chỉ chờ click tối đa 2s
+                #         await settings_btn.click(force=True, timeout=2000)
+                #         profiler.span('Page: Settings Panel Closed')
+                # except Exception as e:
+                #     # Log warning nhưng KHÔNG raise lỗi để luồng chính tiếp tục
+                #     logger.warning(f"Worker {self._credential.email}: Could not close settings panel (Native UI), ignoring. Error: {e}")
 
-                # XÓA ĐOẠN CODE CŨ GÂY LỖI NÀY:
-                # if await page.locator('button[aria-label="Close run settings panel"]').is_visible():
-                #     await page.locator('button[aria-label="Close run settings panel"]').click(force=True)
-                # --- HẾT SỬA ---
+                # # XÓA ĐOẠN CODE CŨ GÂY LỖI NÀY:
+                # # if await page.locator('button[aria-label="Close run settings panel"]').is_visible():
+                # #     await page.locator('button[aria-label="Close run settings panel"]').click(force=True)
+                # # --- HẾT SỬA ---
                 
-                # Đảm bảo nút rerun hiện lên bằng cách hover
-                await last_turn.hover()
-                profiler.span('Page: Last Turn Hover')
+                # Đảm bảo nút rerun hiện lên bằng cách hover không được thì cũng pass
+                try:
+                    await last_turn.hover(timeout=3000)
+                    profiler.span('Page: Last Turn Hover')
+                except Exception:
+                    pass
+
                 rerun = last_turn.locator('[name="rerun-button"]')
-                await expect(rerun).to_be_visible()
-                profiler.span('Page: Rerun Visible')
+                try:
+                    await expect(rerun).to_be_visible(timeout=5000)
+                    profiler.span('Page: Rerun Visible')
+                except Exception:
+                    pass
 
                 # Cơ chế Retry: Click và chờ phản hồi, nếu không thấy thì click lại
                 for i in range(5): # Thử tối đa 5 lần

@@ -207,6 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 # Project Specific Configuration
-states/
-gemini_logs/
-config.yaml
+# states/
+# gemini_logs/
+# config.yaml

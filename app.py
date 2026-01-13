@@ -117,7 +117,7 @@ async def chat_completions(request: openai_models.ChatCompletionRequest):
                 future.cancel()
             raise HTTPException(status_code=504, detail="Request Timed Out (System Overloaded or Stuck)")
         except Exception as e:
-             raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Worker Error: {str(e)}")
 
         # Callback để handle rate limit
         async def handle_rate_limit(model: str):
@@ -135,12 +135,14 @@ async def chat_completions(request: openai_models.ChatCompletionRequest):
                         if chunk.choices[0].delta.content or chunk.choices[0].finish_reason:
                             yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
                     yield "data: [DONE]\n\n"
-                except ResponseError as e:
-                    if e.is_rate_limit():
-                        error_data = {"error": {"message": str(e), "type": "rate_limit_error", "code": 429}}
+                except Exception as e:
+                    status_code = getattr(e, 'status_code', 500)
+                    if status_code == 429:
+                        error_data = {"error": {"message": "Rate limit hit. Rotating worker...", "type": "rate_limit_error", "code": 429}}
                         yield f"data: {json.dumps(error_data)}\n\n"
                     else:
-                        raise
+                        error_data = {"error": {"message": str(e), "type": "server_error", "code": status_code}}
+                        yield f"data: {json.dumps(error_data)}\n\n"
             
             return StreamingResponse(openai_stream(), media_type="text/event-stream")
         else:
@@ -195,16 +197,22 @@ async def StreamGenerator(model_name: str, headers: dict[str, str], body: str, p
 
         # KIỂM TRA STATUS TRƯỚC KHI PARSE CHUNKS
         if resp.status != 200:
+            # in ra debug thông tin lỗi từ response
             error_text = await resp.text()
             profiler.span(f'[{worker_email}] aiohttp error: status {resp.status}', error_text)
+
+            # in ra full resp
+            logging.debug('AIStudio response error: %r', resp)
             
             # Nếu gặp 429 hoặc 403 (Forbidden - Cookie die), thực hiện xoay vòng
             if resp.status in (403, 429):
                 if on_rate_limit:
                     await on_rate_limit(model_name)
             
-            # Sửa lỗi ResponseError không nhận status_code (truyền message đơn giản)
-            raise ResponseError(f"AIStudio Error {resp.status}: {error_text}")
+            # Fix lỗi TypeError: Thay vì truyền message vào __init__, ta ném lỗi kèm thông tin status
+            # Nếu ResponseError không hỗ trợ message, hãy dùng Exception chuẩn hoặc gán thuộc tính
+            err = HTTPException(status_code=resp.status, detail=f"AIStudio Error: {error_text}")
+            raise err
 
         chunks: list[bytes] = []
 
@@ -332,9 +340,10 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
                     data = response_chunk.model_dump_json(exclude_none=True)
                     logging.debug('yield event %r', data)
                     yield f"data: {data}\n\n"
-            except ResponseError as e:
-                if e.is_rate_limit():
-                    # Trả về lỗi 429 NGAY LẬP TỨC cho client
+            except (ResponseError, HTTPException) as e:
+                status_code = getattr(e, 'status_code', 500)
+                # Nếu là lỗi quota hoặc rate limit
+                if status_code == 429 or (isinstance(e, ResponseError) and e.is_rate_limit()):
                     error_response = {
                         "error": {
                             "code": 429, 
@@ -344,7 +353,16 @@ async def stream_generate_content(model: str, request_body: genai.GenerateConten
                     }
                     yield f"data: {json.dumps(error_response)}\n\n"
                 else:
-                    raise
+                    # Các lỗi khác trong quá trình stream
+                    error_msg = str(e.detail) if hasattr(e, 'detail') else str(e)
+                    error_response = {
+                        "error": {
+                            "code": status_code,
+                            "message": error_msg,
+                            "status": "INTERNAL"
+                        }
+                    }
+                    yield f"data: {json.dumps(error_response)}\n\n"
 
         return StreamingResponse(response_generator(), media_type="text/event-stream")
 
