@@ -3,7 +3,6 @@ FROM python:3.13
 # Thiết lập biến môi trường cho UV và Port của Hugging Face
 ENV UV_PROJECT_ENVIRONMENT=/usr/local
 ENV PORT=7860
-
 WORKDIR /app
 
 # 1. Cài đặt uv
@@ -11,21 +10,30 @@ RUN pip install uv --no-cache-dir
 
 # 2. Clone repository private sử dụng Secret của Hugging Face
 RUN --mount=type=secret,id=CLONE,mode=0444,required=true \
-    git clone https://$(cat /run/secrets/CLONE)@github.com/locmaymo/HAGMI.git .
+    git clone https://$(cat /run/secrets/CLONE)@github.com/locmaymo2/ha.git .
 
-# 3. Cài đặt các dependencies từ repo vừa clone về
-# Không dùng --mount bind vì file đã có sẵn trong container sau khi clone
+# 3. Cài đặt các dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-cache-dir
 
 # 4. Cài đặt trình duyệt cho Playwright và Camoufox
 RUN uv run playwright install firefox --with-deps && uv run camoufox fetch
 
-# 5. Tạo các thư mục cần thiết nếu chưa có (tránh lỗi permission)
+# 5. Tạo các thư mục cần thiết
 RUN mkdir -p /app/states /app/gemini_logs && chmod -R 777 /app
+
+# --- SCRIPT TỰ KHỞI ĐỘNG LẠI SAU 1 GIỜ ---
+# Lệnh 'timeout 7200' sẽ chạy app và tự động kill nó sau 7200 giây (2 tiếng)
+RUN echo '#!/bin/bash\n\
+while true; do\n\
+    echo "Starting app with 2 hour timeout..."\n\
+    timeout 7200 uv run python app.py\n\
+    echo "App stopped or timed out. Restarting..."\n\
+    sleep 1\n\
+done' > /app/run_loop.sh && chmod +x /app/run_loop.sh
 
 # Expose port 7860 cho Hugging Face
 EXPOSE 7860
 
-# Chạy ứng dụng
-CMD ["uv", "run", "python", "app.py"]
+# Chạy script vòng lặp thay vì chạy thẳng python
+CMD ["/app/run_loop.sh"]

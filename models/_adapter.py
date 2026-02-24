@@ -230,6 +230,15 @@ def GenAIRequestToAiStudioPromptHistory(model: str, request: GenerateContentRequ
                             displayName='inlineData'
                         )
                     ))
+                if part.fileData:
+                    turns.append(aistudio.PromptContent(
+                        role='user',
+                        generatedFile=aistudio.Blob(
+                            mimeType=part.fileData.mimeType,
+                            data="",  # AI Studio browser side needs data or internal ID
+                            displayName=part.fileData.fileUri
+                        )
+                    ))
                 if part.functionResponse:
                     for turn in reversed(turns):
                         if not turn.functionCall:
