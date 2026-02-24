@@ -212,3 +212,9 @@ __marimo__/
 gemini_logs/
 # config.yaml
 states-all/
+service_account.json
+accounts.txt
+clean_status.txt
+cleaned_accounts.txt
+failed_states.txt
+login_fail.txt

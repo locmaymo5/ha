@@ -233,7 +233,7 @@ class BrowserWorker:
                 _browser = typing.cast(Browser, await AsyncCamoufox(
                     headless=config.Headless,
                     main_world_eval=True,
-                    enable_cache=False,
+                    enable_cache=True,
                     locale="US",
                     proxy=CAMOUFOX_PROXY,
                     geoip=True if CAMOUFOX_PROXY else False,
