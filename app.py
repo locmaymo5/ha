@@ -2,8 +2,9 @@ from typing import AsyncGenerator
 import logging
 import re
 from fastapi import Depends, FastAPI, HTTPException, Query, Header, Response, Request, status, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import urllib.parse
 from models import genai
 from models.genai import (
@@ -25,6 +26,7 @@ from config import config, AIOHTTP_PROXY, AIOHTTP_PROXY_AUTH
 from utils import TinyProfiler, Profiler, CredentialManager
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from models import genai, openai as openai_models
+from pydantic import BaseModel as PydanticBaseModel
 
 
 credentialManager = CredentialManager(config.Credentials)
@@ -510,6 +512,69 @@ async def upload_state(state: UploadFile,  request: Request):
     with open(f'{config.StatesDir}/{filename}', 'wb') as f:
         f.write(content)
     return Response(status_code=200)
+
+
+# ===== AI Translator Frontend (Cover for HF Space) =====
+
+class TranslateRequest(PydanticBaseModel):
+    text: str
+    source: str = "auto"
+    target: str = "vi"
+
+
+@app.post("/api/translate")
+async def translate_text(req: TranslateRequest):
+    """
+    Translate text using Google Translate free API.
+    Lightweight, no API key needed.
+    """
+    text = req.text[:5000]  # Limit text length
+    source = req.source if req.source != "auto" else "auto"
+    target = req.target
+
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": source,
+        "tl": target,
+        "dt": "t",
+        "q": text,
+    }
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=502, detail="Translation service unavailable")
+                data = await resp.json()
+
+                # Parse Google Translate response
+                translated_parts = []
+                if data and data[0]:
+                    for part in data[0]:
+                        if part[0]:
+                            translated_parts.append(part[0])
+
+                translated_text = "".join(translated_parts)
+                detected_lang = data[2] if len(data) > 2 else source
+
+                return JSONResponse(content={
+                    "translated_text": translated_text,
+                    "detected_language": detected_lang,
+                    "source": source,
+                    "target": target,
+                })
+    except aiohttp.ClientError:
+        raise HTTPException(status_code=502, detail="Translation service unavailable")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend():
+    """Serve the AI Translator frontend."""
+    html_path = os.path.join(os.path.dirname(__file__), "static", "index.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        return HTMLResponse(content=f.read())
 
 
 if __name__ == "__main__":
