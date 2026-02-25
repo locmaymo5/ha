@@ -93,6 +93,7 @@ async def api_key_auth(
             )
 
 @app.get("/v1/models", dependencies=[Depends(verify_openai_token)])
+@app.get("/v1openai/models", dependencies=[Depends(verify_openai_token)])
 async def list_models_openai() -> openai_models.ModelList:
     aistudio_models = browser_pool.get_Models()
     data = []
@@ -105,7 +106,7 @@ async def list_models_openai() -> openai_models.ModelList:
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_openai_token)])
-@app.post("/openai/v1/chat/completions", dependencies=[Depends(verify_openai_token)])
+@app.post("/v1openai/chat/completions", dependencies=[Depends(verify_openai_token)])
 async def chat_completions(request: openai_models.ChatCompletionRequest):
     genai_request = adapter.OpenAIRequestToGenAIRequest(request)
     model_name = request.model
