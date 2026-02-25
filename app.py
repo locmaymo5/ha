@@ -105,6 +105,7 @@ async def list_models_openai() -> openai_models.ModelList:
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(verify_openai_token)])
+@app.post("/openai/v1/chat/completions", dependencies=[Depends(verify_openai_token)])
 async def chat_completions(request: openai_models.ChatCompletionRequest):
     genai_request = adapter.OpenAIRequestToGenAIRequest(request)
     model_name = request.model
