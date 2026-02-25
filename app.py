@@ -48,16 +48,28 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
-async def verify_openai_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if config.AuthKey and credentials.credentials != config.AuthKey:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API Key",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return credentials.credentials
+async def verify_openai_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    key: str | None = Query(None, description="API Key"),
+    x_goog_api_key: str | None = Header(None, alias="x-goog-api-key"),
+):
+    # Accept key from: Bearer header, query param, or x-goog-api-key header
+    auth_key = None
+    if credentials:
+        auth_key = credentials.credentials
+    if not auth_key:
+        auth_key = key or x_goog_api_key
+
+    if config.AuthKey:
+        if not auth_key or auth_key != config.AuthKey:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid API Key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    return auth_key
 
 app.add_middleware(
     CORSMiddleware,
